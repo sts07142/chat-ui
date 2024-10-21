@@ -35,7 +35,9 @@
 	import DOMPurify from "isomorphic-dompurify";
 	import { enhance } from "$app/forms";
 	import { browser } from "$app/environment";
-
+	
+	import MermaidBranchViewer from "../BranchViewer.svelte";
+	
 	function sanitizeMd(md: string) {
 		let ret = md
 			.replace(/<\|[a-z]*$/, "")
@@ -67,6 +69,10 @@
 	export let isAuthor = true;
 	export let readOnly = false;
 	export let isTapped = false;
+
+	let showTree = false;
+	let hasBranches = false;
+	let mermaidChart: string;
 
 	$: message = messages.find((m) => m.id === id) ?? ({} as Message);
 
@@ -225,6 +231,84 @@
 		}
 	}
 	$: if (message.children?.length === 0) $convTreeStore.leaf = message.id;
+
+	function escapeTooltip(content: string): string {
+		// Sanitize the content using the existing sanitizeMd function
+		let sanitized = sanitizeMd(content);
+		// Truncate to 30 characters and add ellipsis if needed
+		let truncated = sanitized.length > 30 ? sanitized.slice(0, 30) + "..." : sanitized;
+		// Further escape quotes and replace newlines with spaces for Mermaid compatibility
+		return truncated.replace(/"/g, "&quot;").replace(/\n/g, " ");
+	}
+	function generateMermaidChart(messages: Message[], selectedId: string): string {
+		const pathToSelected: Set<string> = new Set(
+			messages.find((m) => m.id === selectedId)?.ancestors
+		);
+		pathToSelected.add(selectedId);
+		let output = "graph TD\n";
+		function getIcon(message: Message): string {
+			if (message.from === "system") return "🖥️";
+			if (message.from === "user") return "😊";
+			return "🤖";
+		}
+		let nodeClasses = "";
+		const nodeSet: Set<string> = new Set();
+		messages.forEach((message) => {
+			const isSystem = message.from === "system";
+			const isTerminal = !message.children || message.children.length === 0;
+			const isBranch = message.children && message.children.length > 1;
+			const isSelected = message.id === selectedId;
+			if (!nodeSet.has(message.id) && (isSystem || isTerminal || isSelected || isBranch)) {
+				nodeSet.add(message.id);
+				output += `    ${message.id}((${getIcon(message)}))\n`;
+				const safeTooltip = escapeTooltip(message.content || "");
+				output += `    click ${message.id} callback "${safeTooltip}"\n`;
+				if (pathToSelected.has(message.id) && !isSystem) {
+					nodeClasses += `class ${message.id} selected\n`;
+				} else if (isTerminal) {
+					nodeClasses += `class ${message.id} terminal\n`;
+				}
+				const ancestors = (message.ancestors ?? []).slice().reverse();
+				let turns = 0;
+				for (let index = 0; index < ancestors.length; index++) {
+					const ancestorId = ancestors[index];
+					const ancestor = messages.find((m) => m.id === ancestorId) ?? ({} as Message);
+					if (ancestor.from === "user") turns++;
+					if (nodeSet.has(ancestorId)) {
+						const turnMessage = turns > 1 ? "|" + turns + " turns|" : "";
+						output += `    ${ancestorId} --> ${turnMessage} ${message.id}\n`;
+						break;
+					}
+				}
+			}
+		});
+		// Add class definitions
+		output += "\n";
+		output += "classDef selected stroke:#f00,stroke-width:3px\n";
+		output += "classDef terminal stroke-width:2px\n";
+		output += nodeClasses;
+		return output;
+	}
+	function toggleTree() {
+		showTree = !showTree;
+	}
+	$: if (showTree) {
+		mermaidChart = generateMermaidChart(messages, id);
+	}
+	$: if (showTree) {
+		mermaidChart = generateMermaidChart(messages, id);
+	}
+	let memoizedHasBranches: boolean | null = null;
+	let lastMessageCount = 0;
+	function checkForBranches(messages: Message[]): boolean {
+		if (messages.length === lastMessageCount && memoizedHasBranches !== null) {
+			return memoizedHasBranches;
+		}
+		lastMessageCount = messages.length;
+		memoizedHasBranches = messages.some((message) => (message.children?.length ?? 0) > 1);
+		return memoizedHasBranches;
+	}
+	$: hasBranches = checkForBranches(messages);
 </script>
 
 {#if message.from === "assistant"}
@@ -284,7 +368,7 @@
 				{/if}
 				{#each tokens as token}
 					{#if token.type === "code"}
-						<CodeBlock lang={token.lang} code={unsanitizeMd(token.text)} />
+						<CodeBlock lang={token.lang} code={unsanitizeMd(token.text)} {loading}/>
 					{:else}
 						{#await marked.parse(token.raw, options) then parsed}
 							<!-- eslint-disable-next-line svelte/no-at-html-tags -->
@@ -312,6 +396,11 @@
 							<div>{new URL(link).hostname.replace(/^www\./, "")}</div>
 						</a>
 					{/each}
+				</div>
+			{/if}
+			{#if showTree}
+				<div class="mt-4 border-t pt-4 dark:border-gray-700">
+					<MermaidBranchViewer chartDefinition={mermaidChart} messageId={id} />
 				</div>
 			{/if}
 		</div>
